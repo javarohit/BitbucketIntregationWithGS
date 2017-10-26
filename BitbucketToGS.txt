@@ -1,0 +1,173 @@
+// Initila Call 
+function onOpen() {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var menuEntries = [{
+            name: "Load PR",
+            functionName: "loadPR"
+        },
+        {
+            name: "Schedule 24 Hourly Automatic Refresh",
+            functionName: "scheduleRefresh"
+        },
+        {
+            name: "Stop Automatic Refresh",
+            functionName: "removeTriggers"
+        },
+        {
+            name: "Reset Password",
+            functionName: "resetPassword"
+        }
+    ];
+    ss.addMenu("Load", menuEntries);
+    readQuery();
+}
+
+
+// Read all the queries from spreadsheet and create properties.
+function readQuery() {
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Query");
+    var values = sheet.getRange(2, 1, sheet.getLastRow(), sheet.getLastColumn()).getValues();
+    for (m = 0; m < values.length; m++) {
+        if (values[m][0]) {
+            PropertiesService.getScriptProperties().setProperty(values[m][0], values[m][1]);
+            Logger.log("First : " + values[m][0] + "Second" + values[m][1]);
+        }
+    }
+}
+
+
+//Remove Trigger
+
+function removeTriggers() {
+    var triggers = ScriptApp.getProjectTriggers();
+    for (var i = 0; i < triggers.length; i++) {
+        ScriptApp.deleteTrigger(triggers[i]);
+    }
+    Browser.msgBox("Spreadsheet will no longer refresh automatically.");
+}
+
+function scheduleRefresh() {
+    var triggers = ScriptApp.getProjectTriggers();
+    for (var i = 0; i < triggers.length; i++) {
+        ScriptApp.deleteTrigger(triggers[i]);
+    }
+    ScriptApp.newTrigger("loadPR").timeBased().everyHours(24).create();
+    Browser.msgBox("Spreadsheet will refresh automatically every 24 hours.");
+}
+
+function seachPR(p_query, repo) {
+    var url = "";
+    var field = PropertiesService.getScriptProperties().getProperty("field");
+    if (!p_query) {
+        url = "https://bitbucket.org/!api/2.0/repositories/ciphercloud/" + repo + "/pullrequests?pagelen=50";
+    } else {
+        url = "https://bitbucket.org/!api/2.0/repositories/ciphercloud/" + repo + "/pullrequests?pagelen=50&fields=" + field + "&q=" + p_query + "&sort=-created_on";
+    }
+    Logger.log(url);
+    if (!PropertiesService.getScriptProperties().getProperty("digest")) {
+        var userAndPassword = Browser.inputBox("Enter your Jira On Demand User id and Password in the form User:Password. e.g. Rohit:Singh (Note: This will be base64 Encoded and saved as a property on the spreadsheet)", "Userid:Password", Browser.Buttons.OK_CANCEL);
+        var x = Utilities.base64Encode(userAndPassword);
+        PropertiesService.getScriptProperties().setProperty("digest", "Basic " + x);
+    }
+    var digestfull = PropertiesService.getScriptProperties().getProperty("digest");
+    var headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "method": "GET",
+        "headers": {
+            "Authorization": digestfull
+        },
+        "muteHttpExceptions": true
+    };
+    var resp = UrlFetchApp.fetch(url, headers);
+    if (resp.getResponseCode() != 200) {
+        Browser.msgBox("Error retrieving data for url" + url + ":" + resp.getContentText());
+        return "";
+    } else {
+        json = resp.getContentText();
+    }
+    pr_list = JSON.parse(json);
+    Logger.log("response ::  " + pr_list);
+    return pr_list;
+}
+
+function encodeQuery(query) {
+    return encodeURIComponent(query).replace(/'/g, "%27").replace(/"/g, "%22");
+}
+
+function loadPR() {
+    var pr_query = PropertiesService.getScriptProperties().getProperty("query");
+    cleanSheet("Open PR");
+    SpreadsheetApp.flush();
+    loadDataToSheet(encodeQuery(pr_query), "Open PR");
+    SpreadsheetApp.flush();
+}
+
+function loadDataToSheet(querySet, sheetName) {
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+    cleanSheet(sheetName);
+    //sheet.getRange("B1").setValue("Last Update On : "+ Utilities.formatDate(new Date(), "GMT+0530", "dd-MM-yyyy") );
+    //sheet.getRange("C1").setValue("Update By : "+ Session.getActiveUser().getEmail() );
+    c_num = 1;
+    var v_repo = PropertiesService.getScriptProperties().getProperty("repo");
+    repo_arry = v_repo.split(',');
+    for (rep = 0; rep < repo_arry.length; rep++) {
+        PRlist = seachPR(querySet, repo_arry[rep]);
+        issue_len = PRlist.values.length;
+        Logger.log('Issue Lenght : ' + issue_len);
+        for (i = 0; i < issue_len; i++) {
+            c_num = c_num + 1;
+            pr_repo = PRlist.values[i].destination.repository.name;
+            pr_auth = PRlist.values[i].author.display_name;
+            PR_num = PRlist.values[i].id;
+            appr = PRlist.values[i].participants;
+            list_approver = "";
+            for (count = 0; count < appr.length; count++) {
+                if (appr[count].approved) {
+                    if (list_approver == "") {
+                        list_approver = appr[count].user.display_name;
+                    } else {
+                        list_approver = list_approver + "," + appr[count].user.display_name;
+                    }
+                }
+            }
+            var pro_regex = /PRI-\d{4}|RE-\d{4}|SFDC-\d{5}|SFDC2-\d{4}|OBS-\d{5}|MC-\d{4}|IUC-\d{4}|SN-\d{4}|PFM-\d{4}/gi;
+            issues = PRlist.values[i].title.match(pro_regex);
+            if (issues == null) {
+                issues = PRlist.values[i].description.match(pro_regex);
+            }
+            if (issues == null) {
+                PRI = "Undefined"
+            } else {
+                PRI = issues[0];
+            }
+            var newRow = [pr_auth,
+                '=HYPERLINK("https://bitbucket.org/ciphercloud/' + pr_repo + "/pull-requests/" + PR_num + '","' + PR_num + '")',
+                '=HYPERLINK("https://uswdv001.jira.com/browse/' + PRI + '","' + PRI + '")',
+                pr_repo,
+                PRlist.values[i].destination.branch.name,
+                PRlist.values[i].title,
+                PRlist.values[i].state,
+                PRlist.values[i].created_on.substr(0, 10),
+                PRlist.values[i].updated_on.substr(0, 10),
+                list_approver
+            ];
+            var newData = [newRow];
+            sheet.getRange(c_num, 1, 1, 10).setValues(newData)
+        }
+    }
+    SpreadsheetApp.flush();
+}
+
+function resetPassword() {
+    PropertiesService.getScriptProperties().deleteProperty("digest");
+}
+
+function cleanSheet(sheetName) {
+    ss = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+    var last = ss.getLastRow();
+    if (last >= 2) {
+        ss.getRange(2, 1, last - 1, ss.getLastColumn()).clearFormat();
+        ss.getRange(2, 1, last - 1, ss.getLastColumn()).clearContent();
+    }
+}
